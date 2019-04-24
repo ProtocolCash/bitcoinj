@@ -84,7 +84,9 @@ public class Script {
         SIGHASH_FORKID,
         CHECKLOCKTIMEVERIFY, // Enable CHECKLOCKTIMEVERIFY operation
         ENABLESIGHASHFORKID,
-        MONOLITH_OPCODES // May 15, 2018 Hard fork
+        MONOLITH_OPCODES, // May 15, 2018 Hard fork
+        CHECKSEQUENCEVERIFY,
+        CHECKDATASIG // November 2018 Upgrade
     }
     public static final EnumSet<VerifyFlag> ALL_VERIFY_FLAGS = EnumSet.allOf(VerifyFlag.class);
 
@@ -565,6 +567,8 @@ public class Script {
                 switch (chunk.opcode) {
                 case OP_CHECKSIG:
                 case OP_CHECKSIGVERIFY:
+                case OP_CHECKDATASIG:
+                case OP_CHECKDATASIGVERIFY:
                     sigOps++;
                     break;
                 case OP_CHECKMULTISIG:
@@ -1632,10 +1636,28 @@ public class Script {
                         }
                         break;
                     }
-                    executeCheckLockTimeVerify(txContainingThis, (int) index, script, stack, lastCodeSepLocation, opcode, verifyFlags);
+                    executeCheckLockTimeVerify(txContainingThis, (int) index, stack, verifyFlags);
+                    break;
+                case OP_CHECKSEQUENCEVERIFY:
+                    if (!verifyFlags.contains(VerifyFlag.CHECKSEQUENCEVERIFY)) {
+                        // not enabled; treat as a NOP3
+                        if (verifyFlags.contains(VerifyFlag.DISCOURAGE_UPGRADABLE_NOPS)) {
+                            throw new ScriptException("Script used a reserved opcode " + opcode);
+                        }
+                        break;
+                    }
+                    executeCheckSequenceVerify(txContainingThis, (int) index, stack, verifyFlags);
+                    break;
+                case OP_CHECKDATASIG:
+                case OP_CHECKDATASIGVERIFY:
+                    if (!verifyFlags.contains(VerifyFlag.CHECKDATASIG))
+                        throw new ScriptException("Script used a reserved opcode " + opcode);
+                    if (txContainingThis == null)
+                        throw new IllegalStateException("Script attempted signature check but no tx was provided");
+
+                    executeCheckDataSig(txContainingThis, (int) index, script, stack, lastCodeSepLocation, opcode, value, verifyFlags);
                     break;
                 case OP_NOP1:
-                case OP_NOP3:
                 case OP_NOP4:
                 case OP_NOP5:
                 case OP_NOP6:
@@ -1671,9 +1693,7 @@ public class Script {
     }
 
     // This is more or less a direct translation of the code in Bitcoin Core
-    private static void executeCheckLockTimeVerify(Transaction txContainingThis, int index, Script script, LinkedList<byte[]> stack,
-                                        int lastCodeSepLocation, int opcode,
-                                        Set<VerifyFlag> verifyFlags) throws ScriptException {
+    private static void executeCheckLockTimeVerify(Transaction txContainingThis, int index, LinkedList<byte[]> stack, Set<VerifyFlag> verifyFlags) throws ScriptException {
         if (stack.size() < 1)
             throw new ScriptException("Attempted OP_CHECKLOCKTIMEVERIFY on a stack with size < 1");
 
@@ -1709,6 +1729,71 @@ public class Script {
         if (!txContainingThis.getInput(index).hasSequence())
             throw new ScriptException("Transaction contains a final transaction input for a CHECKLOCKTIMEVERIFY script.");
     }
+
+    private static void executeCheckSequenceVerify(Transaction txContainingThis, int index, LinkedList<byte[]> stack, Set<VerifyFlag> verifyFlags) throws ScriptException {
+        if (stack.size() < 1)
+            throw new ScriptException("Attempted OP_CHECKSEQUENCEVERIFY on a stack with size < 1");
+
+        // Note that elsewhere numeric opcodes are limited to operands in the range -2**31+1 to 2**31-1, however it is
+        // legal for opcodes to produce results exceeding that range. This limitation is implemented by CScriptNum's
+        // default 4-byte limit.
+        // Thus as a special case we tell CScriptNum to accept up to 5-byte bignums, which are good until 2**39-1, well
+        // beyond the 2**32-1 limit of the nSequence field itself.
+        final long nSequence = castToBigInteger(stack.getLast(), 5, verifyFlags.contains(VerifyFlag.MINIMALDATA)).longValue();
+
+        // In the rare event that the argument may be < 0 due to some arithmetic being done first, you can always use
+        // 0 MAX CHECKSEQUENCEVERIFY.
+        if (nSequence < 0)
+            throw new ScriptException("Negative sequence");
+
+        // To provide for future soft-fork extensibility, if the
+        // operand has the disabled lock-time flag set,
+        // CHECKSEQUENCEVERIFY behaves as a NOP.
+        if ((nSequence & TransactionInput.SEQUENCE_LOCKTIME_DISABLE_FLAG) != 0)
+            return;
+
+        // Compare the specified sequence number with the input.
+        checkSequence(nSequence, txContainingThis, index);
+    }
+
+    private static void checkSequence(long nSequence, Transaction txContainingThis, int index) {
+        // Relative lock times are supported by comparing the passed in operand to the sequence number of the input.
+        long txToSequence = txContainingThis.getInput(index).getSequenceNumber();
+
+        // Fail if the transaction's version number is not set high enough to trigger BIP 68 rules.
+        if (txContainingThis.getVersion() < 2)
+            throw new ScriptException("Transaction version is < 2");
+
+        // Sequence numbers with their most significant bit set are not consensus constrained. Testing that the
+        // transaction's sequence number do not have this bit set prevents using this property to get around a
+        // CHECKSEQUENCEVERIFY check.
+        if ((txToSequence & TransactionInput.SEQUENCE_LOCKTIME_DISABLE_FLAG) != 0)
+            throw new ScriptException("Sequence disable flag is set");
+
+        // Mask off any bits that do not have consensus-enforced meaning
+        // before doing the integer comparisons
+        long nLockTimeMask =  TransactionInput.SEQUENCE_LOCKTIME_TYPE_FLAG | TransactionInput.SEQUENCE_LOCKTIME_MASK;
+        long txToSequenceMasked = txToSequence & nLockTimeMask;
+        long nSequenceMasked = nSequence & nLockTimeMask;
+
+        // There are two kinds of nSequence: lock-by-blockheight
+        // and lock-by-blocktime, distinguished by whether
+        // nSequenceMasked < CTxIn::SEQUENCE_LOCKTIME_TYPE_FLAG.
+        //
+        // We want to compare apples to apples, so fail the script
+        // unless the type of nSequenceMasked being tested is the same as
+        // the nSequenceMasked in the transaction.
+        if (!((txToSequenceMasked < TransactionInput.SEQUENCE_LOCKTIME_TYPE_FLAG && nSequenceMasked < TransactionInput.SEQUENCE_LOCKTIME_TYPE_FLAG) ||
+                (txToSequenceMasked >= TransactionInput.SEQUENCE_LOCKTIME_TYPE_FLAG && nSequenceMasked >= TransactionInput.SEQUENCE_LOCKTIME_TYPE_FLAG))) {
+            throw new ScriptException("Relative locktime requirement type mismatch");
+        }
+
+        // Now that we know we're comparing apples-to-apples, the
+        // comparison is a simple numeric one.
+        if (nSequenceMasked > txToSequenceMasked)
+            throw new ScriptException("Relative locktime requirement not satisfied");
+    }
+
 
     private static void executeCheckSig(Transaction txContainingThis, int index, Script script, LinkedList<byte[]> stack,
                                         int lastCodeSepLocation, int opcode, Coin value,
@@ -1797,6 +1882,45 @@ public class Script {
                 throw new ScriptException("Script failed OP_CHECKSIGVERIFY");
     }
 
+    // https://github.com/bitcoincashorg/bitcoincash.org/blob/master/spec/op_checkdatasig.md
+    private static void executeCheckDataSig(Transaction txContainingThis, int index, Script script, LinkedList<byte[]> stack,
+                                            int lastCodeSepLocation, int opcode, Coin value,
+                                            Set<VerifyFlag> verifyFlags) throws ScriptException {
+        final boolean requireCanonical = verifyFlags.contains(VerifyFlag.STRICTENC)
+                || verifyFlags.contains(VerifyFlag.DERSIG)
+                || verifyFlags.contains(VerifyFlag.LOW_S);
+        if (stack.size() < 3)
+            throw new ScriptException("Attempted OP_DATACHECKSIG(VERIFY) on a stack with size < 3");
+        byte[] pubKey = stack.pollLast();
+        byte[] messageByte = stack.pollLast();
+        byte[] sigBytes = stack.pollLast();
+
+        boolean sigValid = false;
+
+        try {
+            TransactionSignature sig = TransactionSignature.decodeFromBitcoin(sigBytes, requireCanonical,
+                    verifyFlags.contains(VerifyFlag.LOW_S));
+
+            Sha256Hash hash = Sha256Hash.of(messageByte);
+
+            sigValid = ECKey.verify(hash.getBytes(), sig, pubKey);
+        } catch (Exception e1) {
+            // There is (at least) one exception that could be hit here (EOFException, if the sig is too short)
+            // Because I can't verify there aren't more, we use a very generic Exception catch
+
+            // This RuntimeException occurs when signing as we run partial/invalid scripts to see if they need more
+            // signing work to be done inside LocalTransactionSigner.signInputs.
+            if (!e1.getMessage().contains("Reached past end of ASN.1 stream"))
+                log.warn("Signature checking failed!", e1);
+        }
+
+        if (opcode == OP_CHECKDATASIG)
+            stack.add(sigValid ? new byte[] {1} : new byte[] {});
+        else if (opcode == OP_CHECKDATASIGVERIFY)
+            if (!sigValid)
+                throw new ScriptException("Script failed OP_CHECKSIGVERIFY");
+    }
+  
     /**
      * Checks the Public Key encoding
      * (bitcoin-abc implementation as a reference)

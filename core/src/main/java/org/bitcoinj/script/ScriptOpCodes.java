@@ -86,9 +86,9 @@ public class ScriptOpCodes {
 
     // splice ops
     public static final int OP_CAT = 0x7e;
-    public static final int OP_SPLIT = 0x7f;
-    public static final int OP_NUM2BIN = 0x80;
-    public static final int OP_BIN2NUM = 0x81;
+    public static final int OP_SPLIT = 0x7f; // after monolith upgrade (May 2018)
+    public static final int OP_NUM2BIN = 0x80; // after monolith upgrade (May 2018)
+    public static final int OP_BIN2NUM = 0x81; // after monolith upgrade (May 2018)
     public static final int OP_SIZE = 0x82;
 
     // bit logic
@@ -145,13 +145,35 @@ public class ScriptOpCodes {
     // block state
     /** Check lock time of the block. Introduced in BIP 65, replacing OP_NOP2 */
     public static final int OP_CHECKLOCKTIMEVERIFY = 0xb1;
+    /** Check sequence verify - prevents non-final transaction from being included in a block until the input has
+     *  reached the given age. Introduced in BIP 112, replacing OP_NOP3 */
+    public static final int OP_CHECKSEQUENCEVERIFY = 0xb2;
+
+    // additional crypto
+    /** Check whether a signature is valid with respect to a message hash and and a public key. */
+    public static final int OP_CHECKDATASIG = 0xba;
+    public static final int OP_CHECKDATASIGVERIFY = 0xbb;
+    // multi-byte opcodes
+    /**
+     * Reserved range for multi-byte opcodes
+     * per https://github.com/Bitcoin-ABC/bitcoin-abc/commit/b76f72e9e684fd19b300e59fd1de590cd1b46b48
+     */
+    public static final int OP_PREFIX_BEGIN = 0xf0;
+    public static final int OP_PREFIX_END = 0xf7;
+    // template matching params
+    // *NOT* real opcodes.  If found in real Script, they can be interpreted as OP_UNKNOWN
+    public static final int OP_SMALLINTEGER = 0xfa;
+    public static final int OP_PUBKEYS = 0xfb;
+    public static final int OP_PUBKEYHASH = 0xfd;
+    public static final int OP_PUBKEY = 0xfe;
 
     // expansion
     public static final int OP_NOP1 = 0xb0;
     /** Deprecated by BIP 65 */
     @Deprecated
     public static final int OP_NOP2 = OP_CHECKLOCKTIMEVERIFY;
-    public static final int OP_NOP3 = 0xb2;
+    /** Deprecated by BIP 112 */
+    public static final int OP_NOP3 = OP_CHECKSEQUENCEVERIFY;
     public static final int OP_NOP4 = 0xb3;
     public static final int OP_NOP5 = 0xb4;
     public static final int OP_NOP6 = 0xb5;
@@ -266,14 +288,16 @@ public class ScriptOpCodes {
         .put(OP_CHECKMULTISIGVERIFY, "CHECKMULTISIGVERIFY")
         .put(OP_NOP1, "NOP1")
         .put(OP_CHECKLOCKTIMEVERIFY, "CHECKLOCKTIMEVERIFY")
-        .put(OP_NOP3, "NOP3")
+        .put(OP_CHECKSEQUENCEVERIFY, "CHECKSEQUENCEVERIFY")
         .put(OP_NOP4, "NOP4")
         .put(OP_NOP5, "NOP5")
         .put(OP_NOP6, "NOP6")
         .put(OP_NOP7, "NOP7")
         .put(OP_NOP8, "NOP8")
         .put(OP_NOP9, "NOP9")
-        .put(OP_NOP10, "NOP10").build();
+        .put(OP_NOP10, "NOP10")
+        .put(OP_CHECKDATASIG, "CHECKDATASIG")
+        .put(OP_CHECKDATASIGVERIFY, "CHECKDATASIGVERIFY").build();
 
     private static final Map<String, Integer> opCodeNameMap = ImmutableMap.<String, Integer>builder()
         .put("0", OP_0)
@@ -379,7 +403,7 @@ public class ScriptOpCodes {
         .put("CHECKMULTISIGVERIFY", OP_CHECKMULTISIGVERIFY)
         .put("NOP1", OP_NOP1)
         .put("CHECKLOCKTIMEVERIFY", OP_CHECKLOCKTIMEVERIFY)
-        .put("NOP2", OP_NOP2)
+        .put("CHECKSEQUENCEVERIFY", OP_CHECKSEQUENCEVERIFY)
         .put("NOP3", OP_NOP3)
         .put("NOP4", OP_NOP4)
         .put("NOP5", OP_NOP5)
@@ -387,7 +411,9 @@ public class ScriptOpCodes {
         .put("NOP7", OP_NOP7)
         .put("NOP8", OP_NOP8)
         .put("NOP9", OP_NOP9)
-        .put("NOP10", OP_NOP10).build();
+        .put("NOP10", OP_NOP10)
+        .put("CHECKDATASIG", OP_CHECKDATASIG)
+        .put("CHECKDATASIGVERIFY", OP_CHECKDATASIGVERIFY).build();
 
     /**
      * Converts the given OpCode into a string (eg "0", "PUSHDATA", or "NON_OP(10)")
